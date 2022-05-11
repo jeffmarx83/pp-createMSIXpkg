@@ -1,0 +1,104 @@
+pool﻿: 
+  vmImage﻿: windows-﻿2019
+﻿
+trigger﻿: none
+﻿
+####
+#This pipeline will be triggered only when a new PR addressed to master is created
+pr:
+- master
+﻿
+variables:
+- group﻿: 'systray-pipeline' # variable group
+- name﻿: 'buildPlatform'
+  value﻿: 'x64'
+- name﻿: 'buildConfiguration'
+  value﻿: 'release'
+- name﻿: 'major'
+  value﻿: 1
+- name﻿: 'minor'
+  value﻿: 0
+- name﻿: 'build'
+  value﻿: 0
+- name﻿: 'revision'
+  value﻿: $[counter('rev', 0)]
+- name﻿: 'appxPackageDir'
+  value﻿: '$(build.artifactStagingDirectory)\AppxPackages\\'
+ ﻿
+####
+ #Next variable is important because the pipelines runs on the repository root
+-name﻿: 'folderRepository'
+  value﻿: '<The full path of the folder in the repository>'
+  
+steps:
+####
+#This steps is required to retrive the NuGet Packages, because we aren't build the solution.
+- task﻿: NuGetCommand@2
+  displayName﻿: 'Restore NuGet packages'
+  inputs:
+    command﻿: 'restore'
+    restoreSolution﻿: '$(Agent.BuildDirectory)\s\$(folderRepository)\SystrayExtension.sln'
+    feedsToUse﻿: 'select'
+﻿
+####
+#This step downloads the certificate that we will use to sign the application. 
+#We will detail later how to store the certificate.
+- task﻿: DownloadSecureFile@1
+  inputs:
+    secureFile﻿: '$(signingCert.secureFilePath)'
+  displayName﻿: 'Download Secure PFX File'
+  name﻿: mySecureFile
+﻿
+####
+#This step installs the certificate in the agent. 
+#We're using the variables $(mySecureFile.secureFilePath) and $(signingCert.password) from a variable group. We will add details on how to do this later on.
+- task﻿: PowerShell@2
+  inputs:
+    targetType﻿: 'inline'
+    script﻿: |
+      Write-Host "Start adding the PFX file to the certificate store."
+      $pfxpath = '$(mySecureFile.secureFilePath)'
+      $password = '$(signingCert.password)'      
+      Add-Type -AssemblyName System.Security
+      $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+      $cert.Import($pfxpath, $password, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]"PersistKeySet")
+      $store = new-object system.security.cryptography.X509Certificates.X509Store -argumentlist "MY", CurrentUser
+      $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]"ReadWrite")
+      $store.Add($cert)
+      $store.Close()
+  displayName﻿: 'Install PFX File'
+﻿
+####
+#This step builds the Systray project before the package, because they are not explicitly referenced to each other.
+- task﻿: VSBuild@1
+  inputs:
+    solution﻿: '$(Agent.BuildDirectory)\s\$(folderRepository)\SystrayComponent\SystrayComponent.csproj'
+    platform﻿: $(buildPlatform)
+    configuration﻿: $(buildConfiguration)
+  displayName﻿: 'Building Win32 App'
+﻿
+####
+#This step builds, package and sign the application.
+- task﻿: VSBuild@1
+  inputs:
+    solution﻿: $(Agent.BuildDirectory)\s\$(folderRepository)\PackageManager\PackageManager.wapproj
+    platform﻿: $(buildPlatform)
+    configuration﻿: $(buildConfiguration)
+    msbuildArguments﻿: '/p:AppxBundlePlatforms="$(buildPlatform)" /p:AppxPackageDir="$(appxPackageDir)" /p:AppxBundle=Never /p:UapAppxPackageBuildMode=StoreAndSideload /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile="$(signingCert.secureFilePath)" /p:PackageCertificatePassword="$(signingCert.password)"'
+  displayName﻿: 'Package the App'
+﻿
+####
+#This step copies the output files so they can be deployed.
+- task﻿: CopyFiles@2
+  displayName﻿: 'Copy Files to: $(build.artifactstagingdirectory)'
+  inputs:
+    SourceFolder﻿: '$(system.defaultworkingdirectory)'
+    Contents﻿: '**\bin\$(BuildConfiguration)\**'
+    TargetFolder﻿: '$(build.artifactstagingdirectory)'
+﻿
+####
+#This step publishes the artifact.
+- task﻿: PublishBuildArtifacts@1
+  displayName﻿: 'Publish Artifact: drop'
+  inputs:
+    PathtoPublish﻿: '$(build.artifactstagingdirectory)'
